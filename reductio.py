@@ -22,13 +22,13 @@ def ismem(term):
 
 def compose(offset, base, index, scale):
     if not base and not index and not scale:
-        return "(%s)" % offset
+        return f"({offset})"
     elif not index and not scale:
-        return "%s(%s)" % (offset, base)
+        return f"{offset}({base})"
     elif not scale:
-        return "%s(%s,%s,1)" % (offset, base, index)
+        return f"{offset}({base},{index},1)"
     else:
-        return "%s(%s,%s,%s)" % (offset, base, index, scale)
+        return f"{offset}({base},{index},{scale})"
 
 def decompose(term):
     offset = base = index = scale = ""
@@ -62,8 +62,7 @@ def decompose(term):
 BAR_LENGTH = 50
 BAR_REFRESH = .001 # .001
 def progress(p, l):
-    if l < 1:
-        l = 1
+    l = max(l, 1)
     if p / float(l) > progress.last + BAR_REFRESH or p == l:
         progress.last = p / float(l)
         sys.stdout.write(
@@ -110,13 +109,13 @@ def break_write(s, asm):
                     # does not occur in the middle of an object.
                     break
                 f.write(l)
-                c = c + 1
+                c += 1
             # assume global directives are always above their label
             # (not a safe assumption)
             # and keep directive and label together
             if asm[c-1].startswith(".glob"):
                 f.write(asm[c])
-                c = c + 1
+                c += 1
         i = i + 1
     return ["%s%03d" % (s, k) for k in range(i)]
 
@@ -141,8 +140,7 @@ def remove_prologue(asm):
         else:
             prologue.append(l)
     if not found_prologue:
-        for l in prologue:
-            pasm.append(l)
+        pasm.extend(iter(prologue))
         prologue = []
 
     return [pasm,prologue]
@@ -155,7 +153,7 @@ def pass_1(asm):
     for p, l in enumerate(asm):
         progress(p, len(asm)-1)
         if l.startswith("mov") and "<LCI>" not in l:
-            pasm.append("# pass 1 (constants) > " + l)
+            pasm.append(f"# pass 1 (constants) > {l}")
 
             tok = l.find(",", l.find(")"))
             if tok == -1:
@@ -165,7 +163,7 @@ def pass_1(asm):
 
             # NOTE: requires M/o/Vfuscator to only produce dword constants
             if source.startswith("$"):
-                pasm.append("#constant> " + l)
+                pasm.append(f"#constant> {l}")
 
                 # have to jump through some hoops due to as and ld limitations
                 # on absolutes 
@@ -173,13 +171,15 @@ def pass_1(asm):
                 pasm.append(".section .data\n")
                 #pasm.append(".ifndef .C%s\n" % c)
                 if source[1:] not in constants:
-                    pasm.append(".global .C%s\n" % (c)) # split global
-                    pasm.append(".C%s: .long %s\n" % (c, source[1:]))
+                    pasm.extend((".global .C%s\n" % (c), ".C%s: .long %s\n" % (c, source[1:])))
                     constants.add(source[1:])
-                #pasm.append(".endif\n")
-                pasm.append(".section .text\n")
-                pasm.append("movl (.C%s), %%ebp\n" % c)
-                pasm.append("movl %%ebp, %s\n" % dest)
+                pasm.extend(
+                    (
+                        ".section .text\n",
+                        "movl (.C%s), %%ebp\n" % c,
+                        "movl %%ebp, %s\n" % dest,
+                    )
+                )
             else:
                 pasm.append(l)
         else:
@@ -189,16 +189,16 @@ def pass_1(asm):
 # pass 2:
 # replace all register to register transfers
 def pass_2(asm):
-    pasm=[]
-    pasm.append(".section .data\n")
-    pasm.append(".global .r2r\n") # split global
-    pasm.append(".r2r: .long 0\n")
-    pasm.append(".section .text\n")
-
+    pasm = [
+        ".section .data\n",
+        ".global .r2r\n",
+        ".r2r: .long 0\n",
+        ".section .text\n",
+    ]
     for p, l in enumerate(asm):
         progress(p, len(asm)-1)
         if l.startswith("mov") and "<LCI>" not in l:
-            pasm.append("# pass 2 (r2r) > " + l)
+            pasm.append(f"# pass 2 (r2r) > {l}")
 
             tok = l.find(",", l.find(")"))
             if tok == -1:
@@ -214,8 +214,12 @@ def pass_2(asm):
                 s = "l"
 
             if source.startswith("%") and dest.startswith("%"):
-                pasm.append("mov%s %s, (.r2r)\n" % (s, source))
-                pasm.append("mov%s (.r2r), %s\n" % (s, dest))
+                pasm.extend(
+                    (
+                        "mov%s %s, (.r2r)\n" % (s, source),
+                        "mov%s (.r2r), %s\n" % (s, dest),
+                    )
+                )
             else:
                 pasm.append(l)
 
@@ -226,46 +230,31 @@ def pass_2(asm):
 # pass 3:
 # pad .data and .bss sections to allow data accesses to extend past boundaries
 def pass_3(asm):
-    pasm=[]
-    pasm.append("# section padding\n")
-    pasm.append(".section .data\n")
-    for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".long 0\n")
+    pasm = ["# section padding\n", ".section .data\n"]
+    pasm.extend(".long 0\n" for _ in xrange(0,(XFER_SIZE+1)/4))
     pasm.append(".section .bss\n")
+    pasm.extend(".long 0\n" for _ in xrange(0,(XFER_SIZE+1)/4))
+    pasm.extend(("# end padding\n", "# mov32 shuffle space\n", ".section .data\n"))
     for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".long 0\n")
-    pasm.append("# end padding\n")
-    pasm.append("# mov32 shuffle space\n")
-    pasm.append(".section .data\n")
+        pasm.extend((".global .s_a%d\n" % i, ".s_a%d: .byte 0\n" % i))
     for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".global .s_a%d\n" % i) # split global
-        pasm.append(".s_a%d: .byte 0\n" % i)
+        pasm.extend((".global .s_b%d\n" % i, ".s_b%d: .byte 0\n" % i))
     for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".global .s_b%d\n" % i) # split global
-        pasm.append(".s_b%d: .byte 0\n" % i)
+        pasm.extend((".global .s_c%d\n" % i, ".s_c%d: .byte 0\n" % i))
     for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".global .s_c%d\n" % i) # split global
-        pasm.append(".s_c%d: .byte 0\n" % i)
+        pasm.extend((".global .r_a%d\n" % i, ".r_a%d: .byte 0\n" % i))
     for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".global .r_a%d\n" % i) # split global
-        pasm.append(".r_a%d: .byte 0\n" % i)
+        pasm.extend((".global .r_b%d\n" % i, ".r_b%d: .byte 0\n" % i))
     for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".global .r_b%d\n" % i) # split global
-        pasm.append(".r_b%d: .byte 0\n" % i)
-    for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".global .r_c%d\n" % i) # split global
-        pasm.append(".r_c%d: .byte 0\n" % i)
+        pasm.extend((".global .r_c%d\n" % i, ".r_c%d: .byte 0\n" % i))
     pasm.append("# end shuffle space\n")
     for p, l in enumerate(asm):
         progress(p, len(asm)-1)
         pasm.append(l)
-    pasm.append("# section padding\n")
-    pasm.append(".section .data\n")
-    for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".long 0\n")
+    pasm.extend(("# section padding\n", ".section .data\n"))
+    pasm.extend(".long 0\n" for _ in xrange(0,(XFER_SIZE+1)/4))
     pasm.append(".section .bss\n")
-    for i in xrange(0,(XFER_SIZE+1)/4):
-        pasm.append(".long 0\n")
+    pasm.extend(".long 0\n" for _ in xrange(0,(XFER_SIZE+1)/4))
     pasm.append("# end padding\n")
 
     return pasm
@@ -277,7 +266,7 @@ def pass_4(asm):
     for p, l in enumerate(asm):
         progress(p, len(asm)-1)
         if l.startswith("mov") and "<LCI>" not in l:
-            pasm.append("# pass 4 (32b) > " + l)
+            pasm.append(f"# pass 4 (32b) > {l}")
 
             tok = l.find(",", l.find(")"))
             if tok == -1:
@@ -294,25 +283,35 @@ def pass_4(asm):
                     # r8 -> m8
                     r32 = "%%e%cx" % source[1]
                     m = dest[dest.index("(")+1:dest.index(")")]
-                    if not "%" in m:
+                    if "%" not in m:
                         # "(b)" format
                         b = m
                         si = ""
                     else:
                         # "b(si)" format
                         b = dest[:dest.index("(")]
-                        si = "(" + m + ")"
+                        si = f"({m})"
 
-                    pasm.append("movl %s, (.s_b0)\n" % r32)
-
-                    pasm.append("movl %s%+d%s, %s\n" % (b, -XFER_SIZE, si, sr))
-
+                    pasm.extend(
+                        (
+                            "movl %s, (.s_b0)\n" % r32,
+                            "movl %s%+d%s, %s\n" % (b, -XFER_SIZE, si, sr),
+                        )
+                    )
                     if source[2] == 'h':
-                        pasm.append("movl %s, (.s_b0%+d)\n" % (sr, -XFER_SIZE+1))
-                        pasm.append("movl (.s_b0%+d), %s\n" % (-XFER_SIZE+2, sr))
+                        pasm.extend(
+                            (
+                                "movl %s, (.s_b0%+d)\n" % (sr, -XFER_SIZE + 1),
+                                "movl (.s_b0%+d), %s\n" % (-XFER_SIZE + 2, sr),
+                            )
+                        )
                     elif source[2] == 'l':
-                        pasm.append("movl %s, (.s_b0%+d)\n" % (sr, -XFER_SIZE))
-                        pasm.append("movl (.s_b0%+d), %s\n" % (-XFER_SIZE+1, sr))
+                        pasm.extend(
+                            (
+                                "movl %s, (.s_b0%+d)\n" % (sr, -XFER_SIZE),
+                                "movl (.s_b0%+d), %s\n" % (-XFER_SIZE + 1, sr),
+                            )
+                        )
                     else:
                         raise Exception
 
@@ -322,29 +321,37 @@ def pass_4(asm):
                     # m8 -> r8
                     r32 = "%%e%cx" % dest[1]
                     m = source[source.index("(")+1:source.index(")")]
-                    if not "%" in m:
+                    if "%" not in m:
                         # "(b)" format
                         b = m
                         si = ""
                     else:
                         # "b(si)" format
                         b = source[:source.index("(")]
-                        si = "(" + m + ")"
+                        si = f"({m})"
 
                     pasm.append("movl %s, (.r_b0)\n" % r32)
 
                     if dest[2] == 'h':
-                        pasm.append("movl %s%s, %s\n" % (b, si, sr))
-                        pasm.append("movl %s, (.s_b0+1)\n" % (sr))
-                        pasm.append("movl (.r_b0+2), %s\n" % (sr))
-                        pasm.append("movl %s, (.s_b0+2)\n" % (sr))
-                        pasm.append("movl (.r_b0%+d), %s\n" % (sr, -XFER_SIZE+1))
-                        pasm.append("movl %s, (.s_b0%+d)\n" % (sr, -XFER_SIZE+1))
+                        pasm.extend(
+                            (
+                                "movl %s%s, %s\n" % (b, si, sr),
+                                "movl %s, (.s_b0+1)\n" % (sr),
+                                "movl (.r_b0+2), %s\n" % (sr),
+                                "movl %s, (.s_b0+2)\n" % (sr),
+                                "movl (.r_b0%+d), %s\n" % (sr, -XFER_SIZE + 1),
+                                "movl %s, (.s_b0%+d)\n" % (sr, -XFER_SIZE + 1),
+                            )
+                        )
                     elif dest[2] == 'l':
-                        pasm.append("movl %s%s, %s\n" % (b, si, sr))
-                        pasm.append("movl %s, (.s_b0)\n" % (sr))
-                        pasm.append("movl (.r_b0+1), %s\n" % (sr))
-                        pasm.append("movl %s, (.s_b0+1)\n" % (sr))
+                        pasm.extend(
+                            (
+                                "movl %s%s, %s\n" % (b, si, sr),
+                                "movl %s, (.s_b0)\n" % (sr),
+                                "movl (.r_b0+1), %s\n" % (sr),
+                                "movl %s, (.s_b0+1)\n" % (sr),
+                            )
+                        )
                     else:
                         raise Exception
 
@@ -355,46 +362,47 @@ def pass_4(asm):
                     # r16 -> m16
                     r32 = "%%e%cx" % source[1]
                     m = dest[dest.index("(")+1:dest.index(")")]
-                    if not "%" in m:
+                    if "%" not in m:
                         # "(b)" format
                         b = m
                         si = ""
                     else:
                         # "b(si)" format
                         b = dest[:dest.index("(")]
-                        si = "(" + m + ")"
+                        si = f"({m})"
 
-                    pasm.append("movl %s, (.s_b0)\n" % r32)
-
-                    pasm.append("movl %s%+d%s, %s\n" % (b, -XFER_SIZE, si, sr))
-
-                    pasm.append("movl %s, (.s_b0%+d)\n" % (sr, -XFER_SIZE))
-                    pasm.append("movl (.s_b0%+d), %s\n" % (-XFER_SIZE+2, sr))
-
-                    pasm.append("movl %s, %s%+d%s\n" % (sr, b, -XFER_SIZE+2, si))
-
+                    pasm.extend(
+                        (
+                            "movl %s, (.s_b0)\n" % r32,
+                            "movl %s%+d%s, %s\n" % (b, -XFER_SIZE, si, sr),
+                            "movl %s, (.s_b0%+d)\n" % (sr, -XFER_SIZE),
+                            "movl (.s_b0%+d), %s\n" % (-XFER_SIZE + 2, sr),
+                            "movl %s, %s%+d%s\n" % (sr, b, -XFER_SIZE + 2, si),
+                        )
+                    )
                 else:
                     # m16 -> r16
                     r32 = "%%e%cx" % dest[1]
                     m = source[source.index("(")+1:source.index(")")]
-                    if not "%" in m:
+                    if "%" not in m:
                         # "(b)" format
                         b = m
                         si = ""
                     else:
                         # "b(si)" format
                         b = source[:source.index("(")]
-                        si = "(" + m + ")"
+                        si = f"({m})"
 
-                    pasm.append("movl %s, (.r_b0)\n" % r32)
-
-                    pasm.append("movl %s%s, %s\n" % (b, si, sr))
-                    pasm.append("movl %s, (.s_b0)\n" % (sr))
-                    pasm.append("movl (.r_b0+2), %s\n" % (sr))
-                    pasm.append("movl %s, (.s_b0+2)\n" % (sr))
-
-                    pasm.append("movl (.s_b0), %s\n" % r32)
-
+                    pasm.extend(
+                        (
+                            "movl %s, (.r_b0)\n" % r32,
+                            "movl %s%s, %s\n" % (b, si, sr),
+                            "movl %s, (.s_b0)\n" % (sr),
+                            "movl (.r_b0+2), %s\n" % (sr),
+                            "movl %s, (.s_b0+2)\n" % (sr),
+                            "movl (.s_b0), %s\n" % r32,
+                        )
+                    )
             elif l.startswith("movl"):
                 pasm.append(l)
 
